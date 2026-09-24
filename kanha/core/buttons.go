@@ -274,14 +274,14 @@ func GetStartMarkup(chatID int64) td.ReplyMarkup {
 				UrlBtn(F(chatID, "SUPPORT_BTN"), config.SupportChat),
 			},
 			{
-				UrlBtn(F(chatID, "SOURCE_BTN"), "https://github.com/shfhshddhd/Vv.git"),
+				UrlBtn(F(chatID, "SOURCE_BTN"), "https://github.com"),
 			},
 		},
 	}
 }
 
 func GetRepoMarkup(chatID int64, devURL string) td.ReplyMarkup {
-	repoURL := "https://github.com/shfhshddhd/Vv.git"
+	repoURL := "https://github.com"
 	if devURL == "" {
 		if config.DevURL != "" {
 			devURL = config.DevURL
