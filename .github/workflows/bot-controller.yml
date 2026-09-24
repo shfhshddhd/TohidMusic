@@ -20,15 +20,13 @@ jobs:
   reconcile:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-
     steps:
-      - name: Watch, restart and hand over controller
+      - name: Watch, restart and hand over TohidMusic
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-
           REPO="$GITHUB_REPOSITORY"
           WORKFLOW="run-bot.yml"
           CONTROLLER_WORKFLOW="bot-controller.yml"
@@ -39,55 +37,55 @@ jobs:
           controller_handover_done=false
 
           dispatch_bot() {
-            echo "Dispatching a new bot runner..."
             gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$BRANCH"
-            echo "Bot dispatch requested."
           }
 
           dispatch_controller() {
-            if [[ "$controller_handover_done" == "true" ]]; then
-              return
-            fi
+            if [[ "$controller_handover_done" == "true" ]]; then return; fi
             controller_handover_done=true
-            echo "Starting successor controller before this controller reaches its limit..."
             gh workflow run "$CONTROLLER_WORKFLOW" --repo "$REPO" --ref "$BRANCH"
-            echo "Successor controller dispatch requested."
-          }
-
-          runs_json() {
-            gh api --paginate \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/$REPO/actions/workflows/$WORKFLOW/runs?branch=$BRANCH&per_page=100" \
-              | jq '[.workflow_runs[] | {id,status,conclusion,created_at,run_started_at,run_number}]'
           }
 
           active_json() {
-            runs_json | jq '[.[] | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending" or .status == "requested") | .] | sort_by(.created_at)'
+            gh run list               --repo "$REPO"               --workflow "$WORKFLOW"               --branch "$BRANCH"               --limit 100               --json databaseId,status,conclusion,createdAt,number |
+              jq '[.[] |
+                select(
+                  .status == "queued" or
+                  .status == "in_progress" or
+                  .status == "waiting" or
+                  .status == "pending" or
+                  .status == "requested"
+                ) |
+                {
+                  id: .databaseId,
+                  status: .status,
+                  conclusion: .conclusion,
+                  created_at: .createdAt,
+                  run_number: .number
+                }
+              ] | sort_by(.created_at)'
           }
 
           is_ready() {
             local run_id="$1"
-            gh api \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/$REPO/actions/runs/$run_id/jobs?per_page=100" \
-              | jq -e '[.jobs[].steps[]? | select(.name == "Verify bot ready" and .conclusion == "success")] | length > 0' >/dev/null
+            [[ "$run_id" =~ ^[0-9]+$ ]] || return 1
+            gh api -H "Accept: application/vnd.github+json"               "/repos/$REPO/actions/runs/$run_id/jobs?per_page=100" |
+              jq -e '[.jobs[].steps[]? |
+                select(.name == "Verify bot ready" and .conclusion == "success")
+              ] | length > 0' >/dev/null
           }
 
           cancel_run() {
             local run_id="$1"
-            echo "Cancelling old run $run_id"
-            gh api --method POST \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/$REPO/actions/runs/$run_id/cancel" >/dev/null || true
+            [[ "$run_id" =~ ^[0-9]+$ ]] || return 0
+            gh api --method POST -H "Accept: application/vnd.github+json"               "/repos/$REPO/actions/runs/$run_id/cancel" >/dev/null || true
           }
 
-          echo "Controller started. Bot watchdog and controller self-handover are active."
-
           while true; do
-            controller_now="$(date -u +%s)"
-            controller_age_minutes=$(( (controller_now - controller_started) / 60 ))
+            now="$(date -u +%s)"
+            age=$(( (now - controller_started) / 60 ))
 
-            if (( controller_age_minutes >= CONTROLLER_HANDOVER_MINUTES )); then
+            if (( age >= CONTROLLER_HANDOVER_MINUTES )); then
               dispatch_controller
               sleep 30
               continue
@@ -107,23 +105,24 @@ jobs:
             newest_number="$(jq -r '.run_number' <<<"$newest")"
             newest_created="$(jq -r '.created_at' <<<"$newest")"
 
-            echo "Newest active bot run: #$newest_number ($newest_id), created $newest_created"
+            if ! [[ "$newest_id" =~ ^[0-9]+$ ]]; then
+              echo "Invalid newest run id: $newest_id"
+              sleep 30
+              continue
+            fi
+
+            echo "Watching newest TohidMusic run #$newest_number (id=$newest_id)"
 
             if is_ready "$newest_id"; then
-              echo "Newest run #$newest_number is READY. Cancelling every older active run."
-              jq -r --arg target "$newest_id" '.[] | select((.id|tostring) != $target) | .id' <<<"$active" |
+              jq -r --arg target "$newest_id"                 '.[] | select((.id|tostring) != $target) | .id' <<<"$active" |
               while read -r old_id; do
-                [[ -z "$old_id" ]] && continue
-                cancel_run "$old_id"
+                [[ -n "$old_id" ]] && cancel_run "$old_id"
               done
             else
               now="$(date -u +%s)"
               created="$(date -u -d "$newest_created" +%s)"
-              age_minutes=$(( (now - created) / 60 ))
-
-              if (( age_minutes >= BOT_HANDOVER_MINUTES )); then
-                echo "Newest run #$newest_number is $age_minutes minutes old and is not READY yet."
-                echo "Starting a successor bot; current run remains until successor is READY."
+              bot_age=$(( (now - created) / 60 ))
+              if (( bot_age >= BOT_HANDOVER_MINUTES )); then
                 dispatch_bot
                 sleep 60
                 continue
